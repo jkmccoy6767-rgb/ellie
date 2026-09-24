@@ -387,3 +387,60 @@ export function heatmap(el, { rows, cols, values, labels, format, maxAbs, domain
     if (onRowClick) el.querySelectorAll("[data-row]").forEach((d) => d.addEventListener("click", () => onRowClick(+d.dataset.row)));
   });
 }
+
+// ---------------------------------------------------------------- 100% stacked bars (ordinal parts)
+
+/**
+ * rows: [{label, parts: [value, ...]}]; names: part names in order; colors: resolved color per part.
+ * Each row is normalised to 100%; segments are separated by a 2px surface gap.
+ */
+export function stackedBars(el, rows, { names, colors, format = (v) => v, label = "stacked bars" }) {
+  mount(el, () => {
+    el.innerHTML = legendHtml(names.map((n, i) => ({ name: n, color: colors[i], kind: "" })));
+    const W = el.clientWidth || 500, band = 26, bar = 16, labelW = 64, gap = 2;
+    const svg = svgEl("svg", { width: W, height: rows.length * band, role: "img", "aria-label": label }, el);
+    const tip = tooltip(el);
+    rows.forEach((r, i) => {
+      const total = r.parts.reduce((a, b) => a + (b || 0), 0) || 1;
+      const yTop = i * band + (band - bar) / 2;
+      svgEl("text", { x: 0, y: yTop + bar / 2 + 4, class: "axis-label", style: `fill:${cssVar("--text-secondary")};font-size:12px` }, svg).textContent = r.label;
+      let x = labelW;
+      const span = W - labelW;
+      r.parts.forEach((v, k) => {
+        const w = (v / total) * span;
+        if (w <= 0) return;
+        const first = x === labelW, last = Math.abs(x + w - W) < 0.5;
+        const rect = svgEl("rect", { x, y: yTop, width: Math.max(0, w - (last ? 0 : gap)), height: bar, fill: colors[k], rx: first || last ? 4 : 0 }, svg);
+        rect.addEventListener("mousemove", () => tip.show(`<div class="tt-title">${r.label}</div><div class="tt-row"><span><span class="swatch" style="background:${colors[k]}"></span>${names[k]}</span><span>${format(v)} (${Math.round((v / total) * 100)}%)</span></div>`, x + w / 2, yTop));
+        rect.addEventListener("mouseleave", () => tip.hide());
+        x += w;
+      });
+    });
+  });
+}
+
+// ---------------------------------------------------------------- range bar (low .. high with markers)
+
+/** A low-to-high track with a mean marker and the current value. */
+export function rangeBar(el, { low, high, mean, current, format, meanLabel = "Mean target", currentLabel = "Current price" }) {
+  mount(el, () => {
+    el.innerHTML = `<div class="legend"><span><span class="swatch" style="background:${cssVar("--series-1")};border-radius:50%"></span>${meanLabel} ${format(mean)}</span><span><span class="swatch" style="background:${cssVar("--text-primary")};width:2px"></span>${currentLabel} ${format(current)}</span><span><span class="swatch" style="background:${cssVar("--seq-lo")}"></span>Analyst range</span></div>`;
+    const W = el.clientWidth || 400, H = 52;
+    const lo = Math.min(low, current), hi = Math.max(high, current);
+    const pad = (hi - lo) * 0.06 || 1;
+    const x = linear(lo - pad, hi + pad, 8, W - 8);
+    const svg = svgEl("svg", { width: W, height: H, role: "img", "aria-label": `${meanLabel} ${format(mean)}, range ${format(low)} to ${format(high)}` }, el);
+    const y = 18;
+    svgEl("rect", { x: x(low), y: y - 5, width: Math.max(2, x(high) - x(low)), height: 10, rx: 5, fill: cssVar("--seq-lo") }, svg);
+    svgEl("circle", { cx: x(mean), cy: y, r: 7, fill: cssVar("--series-1"), stroke: cssVar("--surface"), "stroke-width": 2 }, svg);
+    svgEl("line", { x1: x(current), x2: x(current), y1: y - 14, y2: y + 14, stroke: cssVar("--text-primary"), "stroke-width": 2 }, svg);
+    const txt = (t, xx, yy, anchor) => {
+      const e = svgEl("text", { x: xx, y: yy, "text-anchor": anchor, class: "axis-label" }, svg);
+      e.textContent = t;
+    };
+    txt(`Low ${format(low)}`, x(low), H - 4, "start");
+    txt(`High ${format(high)}`, x(high), H - 4, "end");
+  });
+}
+
+export { mix as mixColor };

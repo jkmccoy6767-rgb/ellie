@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
+import re
+import threading
 import time
 from dataclasses import dataclass, field
 
@@ -12,6 +15,7 @@ import requests
 log = logging.getLogger(__name__)
 
 PRICE_COLUMNS = ["symbol", "date", "source", "open", "high", "low", "close", "volume"]
+NEWS_COLUMNS = ["symbol", "published_at", "source", "headline", "summary", "url"]
 
 
 class SourceUnavailable(RuntimeError):
@@ -59,3 +63,34 @@ def http_get(
 
 def empty_prices() -> pd.DataFrame:
     return pd.DataFrame(columns=PRICE_COLUMNS)
+
+
+def empty_news() -> pd.DataFrame:
+    return pd.DataFrame(columns=NEWS_COLUMNS)
+
+
+def news_id(symbol: str, headline: str, published_at: str) -> str:
+    """Stable key for a story: the same headline from two feeds on the same UTC day collapses to one row.
+
+    The day is part of the key because formulaic headlines ("X shares fall on weak outlook")
+    recur for genuinely different events.
+    """
+    norm = re.sub(r"[^a-z0-9]+", " ", headline.lower()).strip()
+    return hashlib.sha1(f"{symbol}|{published_at[:10]}|{norm}".encode()).hexdigest()[:20]
+
+
+class RateLimiter:
+    """Thread-safe minimum spacing between calls (e.g. 60/minute for Finnhub's free tier)."""
+
+    def __init__(self, calls_per_minute: float):
+        self.interval = 60.0 / calls_per_minute
+        self._lock = threading.Lock()
+        self._next = 0.0
+
+    def wait(self) -> None:
+        with self._lock:
+            now = time.monotonic()
+            delay = self._next - now
+            self._next = max(now, self._next) + self.interval
+        if delay > 0:
+            time.sleep(delay)

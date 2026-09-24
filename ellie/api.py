@@ -61,6 +61,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def stock_forecast(symbol: str, horizon: int = Query(21, ge=5, le=63)):
         return guarded(platform.forecast, symbol, horizon)
 
+    @app.get("/api/stocks/{symbol}/news")
+    def stock_news(symbol: str):
+        return guarded(platform.stock_news, symbol)
+
+    @app.get("/api/stocks/{symbol}/estimates")
+    def stock_estimates(symbol: str):
+        return guarded(platform.stock_estimates, symbol)
+
+    @app.get("/api/sentiment")
+    def sentiment_overview():
+        return guarded(platform.sentiment_overview)
+
     @app.get("/api/sectors")
     def sectors():
         return guarded(platform.sectors)

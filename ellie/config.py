@@ -32,6 +32,17 @@ class Settings:
         )
     )
     fred_api_key: str | None = field(default_factory=lambda: os.environ.get("ELLIE_FRED_API_KEY"))
+    finnhub_api_key: str | None = field(default_factory=lambda: os.environ.get("ELLIE_FINNHUB_API_KEY"))
+    fmp_api_key: str | None = field(default_factory=lambda: os.environ.get("ELLIE_FMP_API_KEY"))
+    # "lexicon" (default, free, deterministic) or "claude" (language-model scoring; needs Anthropic credentials).
+    sentiment_scorer: str = field(default_factory=lambda: os.environ.get("ELLIE_SENTIMENT_SCORER", "lexicon"))
+    sentiment_model: str = field(default_factory=lambda: os.environ.get("ELLIE_SENTIMENT_MODEL", "claude-opus-5"))
+    # Days of news to pull on each live run (synthetic mode generates its own history).
+    news_days: int = field(default_factory=lambda: _env_int("ELLIE_NEWS_DAYS", 30))
+    # Consensus estimates from different sources that differ by more than this raise an issue.
+    estimate_tolerance: float = field(
+        default_factory=lambda: float(os.environ.get("ELLIE_ESTIMATE_TOLERANCE", 0.1))
+    )
     max_workers: int = field(default_factory=lambda: _env_int("ELLIE_MAX_WORKERS", 8))
     http_timeout: int = field(default_factory=lambda: _env_int("ELLIE_HTTP_TIMEOUT", 20))
     # Relative close-price difference between sources that raises a reconciliation issue.

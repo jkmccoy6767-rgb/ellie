@@ -242,20 +242,33 @@ def _features(close: pd.Series, market: pd.Series) -> pd.DataFrame:
     )
 
 
-def direction_model(close: pd.Series, market: pd.Series, horizon: int = 5, splits: int = 5) -> dict:
-    """Probability the stock is higher in ``horizon`` days, with walk-forward accuracy."""
+def direction_model(
+    close: pd.Series, market: pd.Series, horizon: int = 5, splits: int = 5, extra: pd.DataFrame | None = None
+) -> dict:
+    """Probability the stock is higher in ``horizon`` days, with walk-forward accuracy.
+
+    ``extra`` adds daily alternative-data features (news sentiment, estimate revisions)
+    indexed by trading day. Each value must be known on that day, or the backtest leaks.
+    Rows before the extra data begins are kept, with neutral fill values.
+    """
     from sklearn.ensemble import GradientBoostingClassifier
     from sklearn.model_selection import TimeSeriesSplit
 
     close = close.dropna()
     X = _features(close, market)
+    features = list(FEATURES)
+    if extra is not None and not extra.empty:
+        extra = extra.reindex(close.index)
+        usable = [c for c in extra.columns if extra[c].notna().sum() >= 60]
+        X = X.join(extra[usable].fillna(extra[usable].median()))
+        features += usable
     y = (close.shift(-horizon) > close).astype(float).where(close.shift(-horizon).notna())
-    data = X.join(y.rename("y")).dropna(subset=FEATURES)
+    data = X.join(y.rename("y")).dropna(subset=features)
     labelled = data.dropna(subset=["y"])
     if len(labelled) < 200:
         return {"available": False, "reason": "not enough history"}
 
-    Xl, yl = labelled[FEATURES].to_numpy(), labelled["y"].to_numpy()
+    Xl, yl = labelled[features].to_numpy(), labelled["y"].to_numpy()
     make = lambda: GradientBoostingClassifier(n_estimators=150, max_depth=2, learning_rate=0.05, subsample=0.8, random_state=0)  # noqa: E731
     acc, base = [], []
     # gap=horizon stops the training labels from overlapping the test window.
@@ -266,8 +279,8 @@ def direction_model(close: pd.Series, market: pd.Series, horizon: int = 5, split
         base.append((yl[te] == majority).mean())
 
     clf = make().fit(Xl, yl)
-    latest = data[FEATURES].iloc[[-1]].to_numpy()
-    importances = sorted(zip(FEATURES, clf.feature_importances_), key=lambda t: -t[1])
+    latest = data[features].iloc[[-1]].to_numpy()
+    importances = sorted(zip(features, clf.feature_importances_), key=lambda t: -t[1])
     return {
         "available": True,
         "horizon_days": horizon,
@@ -276,5 +289,6 @@ def direction_model(close: pd.Series, market: pd.Series, horizon: int = 5, split
         "baseline_accuracy": float(np.mean(base)),
         "edge": float(np.mean(acc) - np.mean(base)),
         "folds": len(acc),
+        "alt_data_features": features[len(FEATURES):],
         "feature_importance": [{"feature": f, "importance": float(v)} for f, v in importances],
     }

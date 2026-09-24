@@ -282,3 +282,13 @@ details.table-view summary { color: var(--text-muted); font-size: 12px; cursor: 
 .error { color: var(--critical); padding: 16px; }
 .muted { color: var(--text-muted); }
 .small { font-size: 12px; }
+
+/* ---------- news & sentiment */
+.sent { display: inline-flex; align-items: center; gap: 2px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.sent .swatch { border-radius: 50%; width: 9px; height: 9px; box-shadow: 0 0 0 1px var(--border); }
+.news-list { display: flex; flex-direction: column; }
+.news-item { padding: 8px 0; border-bottom: 1px solid var(--grid); }
+.news-item:last-child { border-bottom: 0; }
+.news-head { font-size: 13px; line-height: 1.35; }
+.news-head a:not(.sym) { color: var(--text-primary); }
+.news-meta { display: flex; gap: 12px; align-items: center; font-size: 12px; margin-top: 3px; color: var(--text-secondary); flex-wrap: wrap; }

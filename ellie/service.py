@@ -11,7 +11,8 @@ import numpy as np
 import pandas as pd
 
 from . import db
-from .analytics import forecast, stats, valuation
+from .analytics import estimates as est
+from .analytics import forecast, sentiment, stats, valuation
 from .sources.fred import SERIES as MACRO_SERIES
 
 
@@ -35,6 +36,10 @@ class Snapshot:
     valuation: pd.DataFrame
     macro: pd.DataFrame
     alerts: list[dict]
+    news: pd.DataFrame
+    analyst: dict[str, pd.DataFrame]
+    news_summary: pd.DataFrame
+    analyst_summary: pd.DataFrame
 
 
 class Platform:
@@ -89,6 +94,22 @@ class Platform:
         metrics = metrics.join(members[["name", "sector", "sub_industry"]])
         if not val.empty:
             metrics = metrics.join(val.drop(columns="sector"))
+
+        as_of = panel.index[-1]
+        news = db.read_df(self.conn, "SELECT id, symbol, published_at, source, sources, headline, url, sentiment, scorer FROM news")
+        news = news[news["symbol"].isin(members.index)]
+        analyst = {t: db.read_df(self.conn, f"SELECT * FROM {t}")
+                   for t in ("estimates", "recommendations", "price_targets", "earnings_surprises")}
+        news_summary = sentiment.symbol_summary(news, as_of)
+        analyst_summary = est.summary(analyst["estimates"], analyst["recommendations"], analyst["price_targets"],
+                                      analyst["earnings_surprises"], metrics["price"], as_of)
+        for extra in (news_summary, analyst_summary):
+            if not extra.empty:
+                metrics = metrics.join(extra)
+        date = as_of.strftime("%Y-%m-%d")
+        alerts = stats.alerts(panel, volume) + sentiment.news_alerts(news_summary, date) + est.estimate_alerts(analyst_summary, date)
+        rank = {"critical": 0, "serious": 1, "warning": 2, "good": 3}
+        alerts.sort(key=lambda a: (rank[a["severity"]], a["symbol"]))
         return Snapshot(
             run_id=run_id,
             panel=panel,
@@ -99,7 +120,11 @@ class Platform:
             sector_idx=stats.sector_indices(panel, members["sector"]),
             valuation=val,
             macro=macro,
-            alerts=stats.alerts(panel, volume),
+            alerts=alerts,
+            news=news,
+            analyst=analyst,
+            news_summary=news_summary,
+            analyst_summary=analyst_summary,
         )
 
     # ------------------------------------------------------------------ views
@@ -210,8 +235,112 @@ class Platform:
             "paths": records(fc.rename_axis("date").reset_index().assign(date=lambda d: d["date"].dt.strftime("%Y-%m-%d"))),
             "volatility": forecast.volatility_forecast(close, horizon),
             "backtest": records(bt.rename_axis("model").reset_index()) if not bt.empty else [],
-            "direction": forecast.direction_model(close, s.index),
+            "direction": forecast.direction_model(close, s.index, extra=Platform._alt_features(s, symbol, close.index)),
         }
+
+    @staticmethod
+    def _alt_features(s: Snapshot, symbol: str, index: pd.DatetimeIndex) -> pd.DataFrame:
+        """News sentiment and estimate revisions as they were known on each trading day."""
+        feats = sentiment.feature_frame(s.news, index, symbol) if not s.news.empty else pd.DataFrame(index=index)
+        if not s.analyst["estimates"].empty:
+            rev = est.revision_feature(s.analyst["estimates"], symbol, index)
+            # Snapshots only exist for part of the history; mark the rest unknown so it is filled neutrally.
+            first = s.analyst["estimates"]["as_of"].min()
+            feats["eps_rev_30d"] = rev.where(index >= pd.Timestamp(first) + pd.Timedelta(days=30))
+        if "sent_7d" in feats:
+            first_news = pd.Timestamp(s.news["published_at"].min()[:10]) + pd.Timedelta(days=7)
+            feats.loc[feats.index < first_news, ["sent_7d", "news_ratio"]] = np.nan
+        return feats
+
+    # ------------------------------------------------------------------ news & analysts
+
+    def sentiment_overview(self) -> dict:
+        s = self.snapshot()
+        if s.news.empty:
+            return {"available": False}
+        news = s.news.assign(sector=s.news["symbol"].map(s.members["sector"]))
+        mean, count = sentiment.daily_sentiment(news)
+        total = count.sum(axis=1)
+        daily = (mean.fillna(0) * count).sum(axis=1) / total.replace(0, np.nan)
+        weekly = (daily.fillna(0) * total).rolling(7, min_periods=1).sum() / total.rolling(7, min_periods=1).sum()
+        ns = s.news_summary.join(s.members[["name", "sector"]])
+        t = pd.to_datetime(news["published_at"]).dt.tz_localize(None)
+        end = s.panel.index[-1] + pd.Timedelta(days=1)
+        last7 = news[t >= end - pd.Timedelta(days=7)]
+        last30 = news[t >= end - pd.Timedelta(days=30)]
+        sectors = pd.DataFrame({
+            "sent_7d": last7.groupby("sector")["sentiment"].mean(),
+            "sent_30d": last30.groupby("sector")["sentiment"].mean(),
+            "news_7d": last7.groupby("sector").size(),
+        }).rename_axis("sector").reset_index()
+        keep = ["symbol", "name", "sector", "sent_7d", "sent_30d", "news_7d", "news_ratio", "sent_change"]
+        active = ns[ns["news_7d"] >= 3].reset_index()
+        latest = news.sort_values("published_at", ascending=False).head(150)
+        return {
+            "available": True,
+            "scorer": news["scorer"].mode().iloc[0],
+            "sentiment_7d": float(last7["sentiment"].mean()) if len(last7) else None,
+            "sentiment_30d": float(last30["sentiment"].mean()) if len(last30) else None,
+            "articles_7d": int(len(last7)),
+            "pct_positive_7d": float((last7["sentiment"] > 0.1).mean()) if len(last7) else None,
+            "pct_negative_7d": float((last7["sentiment"] < -0.1).mean()) if len(last7) else None,
+            "multi_source_share": float(news["sources"].str.contains(",").mean()),
+            "series": series_json(weekly),
+            "volume": series_json(total.astype(float)),
+            "sectors": records(sectors),
+            "most_positive": records(active.nlargest(12, "sent_7d")[keep]),
+            "most_negative": records(active.nsmallest(12, "sent_7d")[keep]),
+            "busiest": records(ns.reset_index().nlargest(12, "news_ratio")[keep]),
+            "latest": records(latest.assign(name=latest["symbol"].map(s.members["name"]))[
+                ["symbol", "name", "published_at", "headline", "url", "sentiment", "sources"]]),
+        }
+
+    def stock_news(self, symbol: str) -> dict:
+        s = self.snapshot()
+        symbol = self._check(symbol)
+        sub = s.news[s.news["symbol"] == symbol].sort_values("published_at", ascending=False)
+        feats = sentiment.feature_frame(s.news, s.panel.index[-126:], symbol) if not sub.empty else pd.DataFrame()
+        return {
+            "symbol": symbol,
+            "summary": {k: none_if_nan(v) for k, v in (s.news_summary.loc[symbol].to_dict().items()
+                                                         if symbol in s.news_summary.index else [])},
+            "sentiment_7d": series_json(feats["sent_7d"]) if "sent_7d" in feats else {"dates": [], "values": []},
+            "items": records(sub.head(60)[["published_at", "headline", "url", "sentiment", "sources", "scorer"]]),
+        }
+
+    def stock_estimates(self, symbol: str) -> dict:
+        s = self.snapshot()
+        symbol = self._check(symbol)
+        a = {k: v[v["symbol"] == symbol] for k, v in s.analyst.items()}
+        cons = est.consensus(a["estimates"])
+        year = s.panel.index[-1].year
+        revisions = {}
+        for period in (f"FY{year}", f"FY{year + 1}"):
+            ser = est.revision_series(a["estimates"], symbol, period)
+            if not ser.empty:
+                revisions[period] = series_json(ser)
+        recs = a["recommendations"].groupby("period")[est.RATING_COLS].median().reset_index() if not a["recommendations"].empty else pd.DataFrame()
+        tgt = a["price_targets"].sort_values("as_of").groupby("source").tail(1)
+        surprises = a["earnings_surprises"].sort_values("period").drop_duplicates("period", keep="last").tail(8)
+        surprises = surprises.assign(surprise=(surprises["actual"] - surprises["estimate"]) / surprises["estimate"].abs())
+        return {
+            "symbol": symbol,
+            "price": float(s.metrics.at[symbol, "price"]),
+            "summary": {k: none_if_nan(v) for k, v in (s.analyst_summary.loc[symbol].to_dict().items()
+                                                         if symbol in s.analyst_summary.index else [])},
+            "consensus": records(cons.drop(columns="symbol")) if not cons.empty else [],
+            "revisions": revisions,
+            "recommendations": records(recs),
+            "targets": records(tgt[["source", "as_of", "mean", "high", "low", "n_analysts"]]),
+            "surprises": records(surprises[["period", "estimate", "actual", "surprise"]]),
+            "sources": sorted(set().union(*[set(v["source"]) for v in a.values() if not v.empty])),
+        }
+
+    def _check(self, symbol: str) -> str:
+        symbol = symbol.upper()
+        if symbol not in self.snapshot().panel.columns:
+            raise UnknownSymbol(f"{symbol} is not a tracked S&P 500 member")
+        return symbol
 
     def sectors(self) -> dict:
         s = self.snapshot()

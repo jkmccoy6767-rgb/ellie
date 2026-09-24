@@ -29,9 +29,9 @@ analysis, and forecasts whose accuracy is measured and reported rather than assu
 |---|---|---|
 | Market prices | Yahoo Finance + Stooq, reconciled | Polygon.io, Databento, Bloomberg/Refinitiv |
 | Fundamentals and filings | SEC EDGAR XBRL (free, official) | S&P Capital IQ, FactSet |
-| Analyst estimates | — | FactSet, Zacks, LSEG I/B/E/S |
+| Analyst estimates | Finnhub + Financial Modeling Prep, reconciled | FactSet, Zacks, LSEG I/B/E/S |
 | Macro data | FRED | FRED, BLS, Treasury |
-| News and sentiment | — | RavenPack, Benzinga, plus in-house language-model scoring |
+| News and sentiment | Yahoo Finance RSS + Finnhub, de-duplicated; lexicon or Claude scoring | RavenPack, Benzinga, plus in-house language-model scoring |
 | Index membership | Open GitHub dataset + bundled fallback | S&P DJI licence (point-in-time) |
 
 **Principle:** have at least two sources for every critical field. The platform
@@ -59,6 +59,7 @@ data, single sign-on and role-based access.
 | Valuation | Multiples vs sector, growth, profitability | ✅ · ⏳ DCF |
 | Forecasting | ARIMA, GARCH, gradient-boosted models, macro scenarios | ✅ ARIMA-GARCH, GBM direction · ⏳ scenarios |
 | Signals | Momentum and quality screens, anomaly alerts | ✅ |
+| Alternative data | News sentiment, analyst revisions, ratings, targets, earnings surprises | ✅ also used as forecast features |
 
 **Governance:** every model has an out-of-sample backtest and an accuracy scorecard
 shown next to its forecast. Models are validated to SR 11-7-style standards before
@@ -71,7 +72,7 @@ regulated use.
 | **0: Discovery** | Weeks 0–6 | Stakeholder interviews, use cases, vendor contracts, architecture sign-off | Open: needs the leadership decisions below |
 | **1: Foundation (MVP)** | Months 2–4 | End-of-day prices, fundamentals and macro data for all stocks; warehouse; market / sector / stock dashboards | ✅ Built (this repository) |
 | **2: Analytics** | Months 4–7 | Risk statistics, screening, alerts, first forecasting models with backtests | ✅ Largely built; estimates data pending a vendor |
-| **3: Advanced** | Months 7–10 | Intraday streaming, sentiment/news, scenario analysis, model-accuracy tracking over time | ⏳ |
+| **3: Advanced** | Months 7–10 | Intraday streaming, sentiment/news, analyst estimates, scenario analysis, model-accuracy tracking over time | 🟡 News sentiment and analyst estimates built · ⏳ intraday, scenarios, accuracy tracking |
 | **4: Scale & harden** | Months 10–12 | Cloud warehouse, single sign-on, disaster recovery, training, expansion beyond the S&P 500 | ⏳ |
 
 ## 7. Team (core, about 8–10 people)

@@ -1,4 +1,4 @@
-import { barChart, heatmap, lineChart, rankBars, redrawAll, scatter } from "./charts.js";
+import { barChart, cssVar, divergingColor, heatmap, lineChart, mixColor, rangeBar, rankBars, redrawAll, scatter, stackedBars } from "./charts.js";
 
 // ---------------------------------------------------------------- data access
 
@@ -52,7 +52,17 @@ const STATUS_ICON = {
 const STATUS_LABEL = { good: "Positive", warning: "Warning", serious: "Serious", critical: "Critical", info: "Info" };
 const status = (sev, label) => `<span class="status"><svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true">${STATUS_ICON[sev] || STATUS_ICON.info}</svg>${label ?? STATUS_LABEL[sev] ?? sev}</span>`;
 
-const RULE_LABEL = { outsized_move: "Outsized move", new_52w_high: "52-week high", new_52w_low: "52-week low", volume_spike: "Volume spike" };
+const RULE_LABEL = {
+  outsized_move: "Outsized move", new_52w_high: "52-week high", new_52w_low: "52-week low", volume_spike: "Volume spike",
+  negative_news: "Negative news", positive_news: "Positive news", estimate_cut: "Estimate cut", estimate_raise: "Estimate raise",
+};
+
+// Sentiment in [-1, 1]: a colored mark plus a word, never color alone.
+const signed = (v, d = 2) => (isNum(v) ? `${v > 0 ? "+" : ""}${v.toFixed(d)}` : "–");
+const sentLabel = (v) => (!isNum(v) ? "–" : v > 0.1 ? "Positive" : v < -0.1 ? "Negative" : "Neutral");
+const sentTag = (v) => (isNum(v) ? `<span class="sent"><span class="swatch" style="background:${divergingColor(v, 1)}"></span>${sentLabel(v)} ${signed(v)}</span>` : "–");
+// Consensus rating on the usual 1 (strong buy) to 5 (strong sell) scale.
+const ratingLabel = (v) => (!isNum(v) ? "–" : v <= 1.5 ? "Strong buy" : v <= 2.5 ? "Buy" : v <= 3.5 ? "Hold" : v <= 4.5 ? "Sell" : "Strong sell");
 
 function tile(label, value, delta = "", opts = {}) {
   return `<div class="tile ${opts.hero ? "hero" : ""}"><div class="label">${label}</div><div class="value">${value}</div>${delta ? `<div class="delta">${delta}</div>` : ""}</div>`;
@@ -183,7 +193,7 @@ function linkRows(scope) {
 
 // ---------------------------------------------------------------- screener
 
-const SCREEN_COLS = [
+const RISK_COLS = [
   ["symbol", "Stock", "l", (r) => `<span class="sym">${r.symbol}</span> <span class="nm">${esc(r.name)}</span>`],
   ["sector", "Sector", "l", (r) => `<span class="muted">${SECTOR_SHORT[r.sector] || r.sector}</span>`],
   ["price", "Price", "", (r) => money(r.price)],
@@ -200,6 +210,19 @@ const SCREEN_COLS = [
   ["market_cap", "Mkt cap", "", (r) => compact(r.market_cap, "$")],
   ["rsi_14", "RSI", "", (r) => num(r.rsi_14, 0)],
 ];
+const ANALYST_COLS = [
+  RISK_COLS[0], RISK_COLS[1], RISK_COLS[2], RISK_COLS[4],
+  ["fwd_pe", "Fwd P/E", "", (r) => num(r.fwd_pe, 1)],
+  ["eps_growth_fwd", "EPS growth", "", (r) => pct(r.eps_growth_fwd)],
+  ["eps_rev_30d", "EPS rev 30d", "", (r) => `<span class="${cls(r.eps_rev_30d)}">${pct(r.eps_rev_30d)}</span>`],
+  ["eps_rev_90d", "EPS rev 90d", "", (r) => `<span class="${cls(r.eps_rev_90d)}">${pct(r.eps_rev_90d)}</span>`],
+  ["rec_score", "Rating", "", (r) => (isNum(r.rec_score) ? `${ratingLabel(r.rec_score)} <span class="muted">${num(r.rec_score, 1)}</span>` : "–")],
+  ["target_upside", "Target upside", "", (r) => `<span class="${cls(r.target_upside)}">${pct(r.target_upside)}</span>`],
+  ["beat_rate", "Beat rate", "", (r) => pctPlain(r.beat_rate, 0)],
+  ["sent_7d", "News 7d", "", (r) => sentTag(r.sent_7d)],
+  ["news_7d", "Stories 7d", "", (r) => (isNum(r.news_7d) ? r.news_7d : "–")],
+];
+const SCREEN_VIEWS = { risk: ["Performance & risk", RISK_COLS], analyst: ["Analysts & news", ANALYST_COLS] };
 const PRESETS = {
   all: ["All", () => true],
   momentum: ["Momentum leaders", (r) => r.momentum_12_1 > 0.2 && r.above_200dma],
@@ -208,12 +231,18 @@ const PRESETS = {
   oversold: ["Oversold (RSI < 30)", (r) => r.rsi_14 < 30],
   highs: ["Near 52-week high", (r) => r.pct_from_52w_high > -0.02],
   stressed: ["Drawdown > 30%", (r) => r.max_dd_1y < -0.3],
+  upgrades: ["Estimates rising (30d > +3%)", (r) => r.eps_rev_30d > 0.03],
+  cuts: ["Estimates falling (30d < -3%)", (r) => r.eps_rev_30d < -0.03],
+  favourites: ["Analyst favourites", (r) => r.rec_score <= 2 && r.target_upside > 0.15],
+  goodnews: ["Positive news flow", (r) => r.sent_7d > 0.3 && r.news_7d >= 3],
+  badnews: ["Negative news flow", (r) => r.sent_7d < -0.3 && r.news_7d >= 3],
 };
 
 async function viewScreener(root, params) {
   const rows = await api("/api/screener");
   const sectors = [...new Set(rows.map((r) => r.sector))].sort();
-  const st = { q: params.get("q") || "", sector: params.get("sector") || "", preset: params.get("preset") || "all", key: "market_cap", dir: -1 };
+  const st = { q: params.get("q") || "", sector: params.get("sector") || "", preset: params.get("preset") || "all", key: "market_cap", dir: -1,
+    view: params.get("view") || (["upgrades", "cuts", "favourites", "goodnews", "badnews"].includes(params.get("preset")) ? "analyst" : "risk") };
   if (!rows.some((r) => r.market_cap != null)) st.key = "symbol", st.dir = 1;
   root.innerHTML = `
     <div class="page-head"><div><h1>Screener</h1><p>Filter and rank every member on returns, risk and valuation</p></div><button class="btn" id="export">Export CSV</button></div>
@@ -222,6 +251,7 @@ async function viewScreener(root, params) {
         <input id="q" type="search" placeholder="Filter by ticker or name" value="${esc(st.q)}" aria-label="Filter" />
         <select id="sector" aria-label="Sector"><option value="">All sectors</option>${sectors.map((s) => `<option ${s === st.sector ? "selected" : ""}>${esc(s)}</option>`).join("")}</select>
         <select id="preset" aria-label="Screen">${Object.entries(PRESETS).map(([k, [l]]) => `<option value="${k}" ${k === st.preset ? "selected" : ""}>${l}</option>`).join("")}</select>
+        ${seg("view", Object.entries(SCREEN_VIEWS).map(([k, [l]]) => [k, l]), st.view)}
         <span class="muted small" id="count"></span>
       </div>
       <div class="table-wrap tall" id="tbl"></div>
@@ -236,6 +266,7 @@ async function viewScreener(root, params) {
       return (x > y ? 1 : x < y ? -1 : 0) * st.dir;
     });
     root.querySelector("#count").textContent = `${current.length} of ${rows.length} stocks`;
+    const SCREEN_COLS = SCREEN_VIEWS[st.view][1];
     root.querySelector("#tbl").innerHTML = `<table><thead><tr>${SCREEN_COLS.map(([k, l, c]) => `<th class="sortable ${c}" data-k="${k}">${l}${st.key === k ? `<span class="arrow">${st.dir > 0 ? "▲" : "▼"}</span>` : ""}</th>`).join("")}</tr></thead><tbody>${current.map((r) => `<tr class="link" data-sym="${r.symbol}">${SCREEN_COLS.map(([, , c, f]) => `<td class="${c}">${f(r)}</td>`).join("")}</tr>`).join("")}</tbody></table>${current.length ? "" : '<div class="empty">No stocks match these filters.</div>'}`;
     root.querySelectorAll("th[data-k]").forEach((th) => th.addEventListener("click", () => {
       st.dir = st.key === th.dataset.k ? -st.dir : (["symbol", "sector"].includes(th.dataset.k) ? 1 : -1);
@@ -246,6 +277,7 @@ async function viewScreener(root, params) {
   root.querySelector("#q").addEventListener("input", (e) => { st.q = e.target.value; draw(); });
   root.querySelector("#sector").addEventListener("change", (e) => { st.sector = e.target.value; draw(); });
   root.querySelector("#preset").addEventListener("change", (e) => { st.preset = e.target.value; draw(); });
+  onSeg(root, "view", (v) => { st.view = v; draw(); });
   root.querySelector("#export").addEventListener("click", () => {
     const keys = Object.keys(rows[0]);
     const csv = [keys.join(","), ...current.map((r) => keys.map((k) => { const v = r[k]; return typeof v === "string" && /[",]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v ?? ""; }).join(","))].join("\n");
@@ -296,6 +328,14 @@ async function viewStock(root, params, symbol) {
     <div class="grid cols-2" style="margin-bottom:16px">
       <div class="card"><div class="card-head"><div><h2>Volatility forecast</h2><div class="sub">GARCH(1,1) expected annualized volatility by day ahead</div></div></div><div id="vol"></div></div>
       <div class="card"><div class="card-head"><div><h2>Direction model</h2><div class="sub">Gradient-boosted classifier · 5-day horizon</div></div></div><div id="dir"></div></div>
+    </div>
+    <div class="grid cols-2" style="margin-bottom:16px">
+      <div class="card"><div class="card-head"><div><h2>Analyst consensus</h2><div class="sub" id="an-sub">Loading…</div></div></div><div id="analyst" class="stack"></div></div>
+      <div class="card"><div class="card-head"><div><h2>News sentiment</h2><div class="sub" id="news-sub">Loading…</div></div></div><div id="newsbox" class="stack"></div></div>
+    </div>
+    <div class="card" style="margin-bottom:16px">
+      <div class="card-head"><div><h2>Earnings estimates</h2><div class="sub">Consensus is the median across sources; revisions come from stored snapshots</div></div></div>
+      <div id="estimates"></div>
     </div>
     <div class="grid cols-2">
       <div class="card"><div class="card-head"><div><h2>Valuation vs sector</h2><div class="sub">Latest annual filing; sector = median of ${esc(p.sector)} members</div></div></div><div id="val"></div></div>
@@ -350,6 +390,147 @@ async function viewStock(root, params, symbol) {
   };
   onSeg(root, "horizon", (v) => { horizon = v; loadForecast(); });
   loadForecast();
+  loadAnalyst(root, s.symbol).catch((e) => { root.querySelector("#analyst").innerHTML = `<div class="error">${esc(e.message)}</div>`; });
+  loadNews(root, s.symbol).catch((e) => { root.querySelector("#newsbox").innerHTML = `<div class="error">${esc(e.message)}</div>`; });
+}
+
+const RATING_NAMES = ["Strong buy", "Buy", "Hold", "Sell", "Strong sell"];
+function ratingColors() {
+  // Ordinal diverging scale: buy side in the positive hue, sell side in the negative hue, hold neutral.
+  const pos = cssVar("--div-pos"), neg = cssVar("--div-neg"), mid = cssVar("--div-mid");
+  return [pos, mixColor(mid, pos, 0.55), cssVar("--text-muted"), mixColor(mid, neg, 0.55), neg];
+}
+
+async function loadAnalyst(root, symbol) {
+  const e = await api(`/api/stocks/${symbol}/estimates`);
+  const a = e.summary, box = root.querySelector("#analyst");
+  root.querySelector("#an-sub").textContent = e.sources.length ? `Sources: ${e.sources.join(", ")}` : "No analyst coverage loaded";
+  if (!e.sources.length) { box.innerHTML = `<div class="empty">No analyst data for ${symbol}. Add a Finnhub or FMP key to pull it.</div>`; root.querySelector("#estimates").innerHTML = ""; return; }
+  box.innerHTML = `
+    <div class="tiles" style="grid-template-columns:repeat(auto-fit,minmax(120px,1fr));margin:0">
+      ${tile("Consensus rating", ratingLabel(a.rec_score), isNum(a.rec_score) ? `${num(a.rec_score, 2)} on a 1–5 scale · ${pctPlain(a.pct_buy, 0)} buy` : "")}
+      ${tile("Target upside", `<span class="${cls(a.target_upside)}">${pct(a.target_upside)}</span>`, `Mean target ${money(a.target_mean)}`)}
+      ${tile("Earnings beat rate", pctPlain(a.beat_rate, 0), `Avg surprise ${pct(a.avg_surprise)}`)}
+      ${tile("Forward P/E", num(a.fwd_pe, 1), `${a.n_analysts ?? "–"} analysts`)}
+    </div>
+    <div><h3 style="margin-bottom:6px">Price targets</h3><div class="chart" id="c-target"></div></div>
+    <div><h3 style="margin-bottom:6px">Rating mix by month</h3><div class="chart" id="c-recs"></div>
+      ${isNum(a.rec_change_3m) ? `<p class="note">Consensus rating ${a.rec_change_3m < -0.05 ? "improved" : a.rec_change_3m > 0.05 ? "worsened" : "was steady"} over 3 months (${signed(a.rec_change_3m)} on the 1–5 scale; lower is more bullish).</p>` : ""}</div>`;
+  if (isNum(a.target_mean)) rangeBar(root.querySelector("#c-target"), { low: a.target_low, high: a.target_high, mean: a.target_mean, current: e.price, format: money });
+  if (e.recommendations.length) {
+    stackedBars(root.querySelector("#c-recs"), e.recommendations.map((r) => ({ label: r.period, parts: [r.strong_buy, r.buy, r.hold, r.sell, r.strong_sell] })), {
+      names: RATING_NAMES, colors: ratingColors(), format: (v) => `${Math.round(v)} analysts`, label: "Analyst rating mix by month",
+    });
+  }
+
+  const est = root.querySelector("#estimates");
+  const rev = Object.entries(e.revisions);
+  est.innerHTML = `
+    <div class="grid cols-2">
+      <div>
+        <div class="table-wrap"><table><thead><tr><th>Period</th><th class="l">Metric</th><th>Consensus</th><th>Low – high</th><th>Analysts</th><th>Sources</th><th>Source spread</th></tr></thead><tbody>
+        ${e.consensus.map((c) => { const f = c.metric === "eps" ? money : (v) => compact(v, "$"); return `<tr><td>${c.period}</td><td class="l">${c.metric === "eps" ? "EPS" : "Revenue"}</td><td>${f(c.mean)}</td><td class="muted">${f(c.low)} – ${f(c.high)}</td><td>${c.n_analysts ?? "–"}</td><td>${c.n_sources}</td><td>${c.n_sources > 1 ? (c.spread > 0.1 ? status("warning", pctPlain(c.spread)) : pctPlain(c.spread)) : "–"}</td></tr>`; }).join("")}
+        </tbody></table></div>
+        <dl class="kv" style="margin-top:12px">
+          <dt>Next-year EPS revision, 30 days</dt><dd class="${cls(a.eps_rev_30d)}">${pct(a.eps_rev_30d)}</dd>
+          <dt>Next-year EPS revision, 90 days</dt><dd class="${cls(a.eps_rev_90d)}">${pct(a.eps_rev_90d)}</dd>
+          <dt>Expected EPS growth (next year)</dt><dd>${pct(a.eps_growth_fwd)}</dd>
+          <dt>Expected revenue growth (next year)</dt><dd>${pct(a.revenue_growth_fwd)}</dd>
+        </dl>
+      </div>
+      <div class="stack">
+        <div><h3 style="margin-bottom:6px">EPS consensus over time</h3><div class="chart" id="c-rev"></div></div>
+        <div><h3 style="margin-bottom:6px">Earnings surprises (last ${e.surprises.length} quarters)</h3><div class="chart" id="c-surp"></div></div>
+      </div>
+    </div>`;
+  if (rev.length) {
+    lineChart(root.querySelector("#c-rev"), {
+      series: rev.map(([period, ser], i) => ({ name: `${period} EPS`, ...ser, color: i ? "--series-2" : "--series-1" })),
+      height: 180, yFormat: (v) => money(v),
+    });
+  }
+  if (e.surprises.length) {
+    barChart(root.querySelector("#c-surp"), [...e.surprises].reverse().map((q) => ({
+      label: q.period, value: q.surprise,
+      extra: `<div class="tt-row"><span>Estimate</span><span>${money(q.estimate)}</span></div><div class="tt-row"><span>Actual</span><span>${money(q.actual)}</span></div>`,
+    })), { format: (v) => pct(v), valueName: "Surprise vs estimate", label: "Earnings surprises" });
+  }
+}
+
+async function loadNews(root, symbol) {
+  const n = await api(`/api/stocks/${symbol}/news`);
+  const box = root.querySelector("#newsbox"), sm = n.summary;
+  root.querySelector("#news-sub").textContent = n.items.length ? `Scored by ${n.items[0].scorer}` : "No news loaded";
+  if (!n.items.length) { box.innerHTML = `<div class="empty">No recent news for ${symbol}.</div>`; return; }
+  box.innerHTML = `
+    <dl class="kv">
+      <dt>Sentiment, last 7 days</dt><dd>${sentTag(sm.sent_7d)}</dd>
+      <dt>Sentiment, last 30 days</dt><dd>${sentTag(sm.sent_30d)}</dd>
+      <dt>Stories this week</dt><dd>${sm.news_7d ?? 0} <span class="muted">(${isNum(sm.news_ratio) ? num(sm.news_ratio, 1) + "× normal" : "–"})</span></dd>
+    </dl>
+    <div><h3 style="margin-bottom:6px">7-day sentiment, last 6 months</h3><div class="chart" id="c-sent"></div></div>
+    <div><h3 style="margin-bottom:6px">Latest headlines</h3>${headlineList(n.items.slice(0, 12))}</div>`;
+  if (n.sentiment_7d.dates.length) {
+    lineChart(root.querySelector("#c-sent"), {
+      series: [{ name: "7-day sentiment", ...n.sentiment_7d, color: "--series-1" }], height: 150, zeroLine: true, yFormat: (v) => signed(v, 1),
+    });
+  }
+}
+
+function headlineList(items, showSymbol = false) {
+  return `<div class="news-list">${items.map((i) => {
+    const when = i.published_at.slice(0, 16).replace("T", " ");
+    const feeds = (i.sources || "").split(",").filter(Boolean).length;
+    const title = i.url ? `<a href="${esc(i.url)}" target="_blank" rel="noopener">${esc(i.headline)}</a>` : esc(i.headline);
+    return `<div class="news-item"><div class="news-head">${showSymbol ? `<a href="#/stock/${i.symbol}" class="sym"><b>${i.symbol}</b></a> ` : ""}${title}</div>
+      <div class="news-meta">${sentTag(i.sentiment)}<span class="muted">${when} UTC${feeds > 1 ? ` · ${feeds} feeds` : ""}</span></div></div>`;
+  }).join("")}</div>`;
+}
+
+// ---------------------------------------------------------------- news & sentiment page
+
+async function viewNews(root) {
+  const d = await api("/api/sentiment");
+  if (!d.available) { root.innerHTML = `<div class="card empty">No news has been loaded yet.</div>`; return; }
+  const change = isNum(d.sentiment_7d) && isNum(d.sentiment_30d) ? d.sentiment_7d - d.sentiment_30d : null;
+  root.innerHTML = `
+    <div class="page-head"><div><h1>News & sentiment</h1><p>Headline tone across all members · scored by ${esc(d.scorer)}</p></div></div>
+    <div class="tiles">
+      ${tile("Market news sentiment (7 days, −1 to +1)", signed(d.sentiment_7d), `${sentTag(d.sentiment_7d)} · ${signed(change)} vs 30-day average`, { hero: true })}
+      ${tile("Stories this week", d.articles_7d.toLocaleString(), `${pctPlain(d.multi_source_share, 0)} carried by 2+ feeds`)}
+      ${tile("Positive stories", pctPlain(d.pct_positive_7d, 0), "share of this week's stories")}
+      ${tile("Negative stories", pctPlain(d.pct_negative_7d, 0), "share of this week's stories")}
+    </div>
+    <div class="grid cols-2" style="margin-bottom:16px">
+      <div class="card"><div class="card-head"><div><h2>Market sentiment</h2><div class="sub">Story-weighted 7-day average across all members (−1 to +1)</div></div></div><div class="chart" id="c-msent"></div></div>
+      <div class="card"><div class="card-head"><div><h2>News volume</h2><div class="sub">Stories per day</div></div></div><div class="chart" id="c-mvol"></div></div>
+    </div>
+    <div class="grid cols-2" style="margin-bottom:16px">
+      <div class="card"><div class="card-head"><div><h2>Sector sentiment</h2><div class="sub">Average tone of this week's stories · click to screen the sector</div></div></div><div class="chart" id="c-ssent"></div></div>
+      <div class="card"><div class="card-head"><div><h2>Unusual news volume</h2><div class="sub">This week's story count vs the 30-day weekly average</div></div></div><div class="table-wrap" id="t-busy"></div></div>
+    </div>
+    <div class="grid cols-2" style="margin-bottom:16px">
+      <div class="card"><div class="card-head"><div><h2>Most positive this week</h2><div class="sub">At least 3 stories</div></div></div><div class="table-wrap" id="t-pos"></div></div>
+      <div class="card"><div class="card-head"><div><h2>Most negative this week</h2><div class="sub">At least 3 stories</div></div></div><div class="table-wrap" id="t-neg"></div></div>
+    </div>
+    <div class="card"><div class="card-head"><div><h2>Latest headlines</h2></div>${seg("tone", [["all", "All"], ["pos", "Positive"], ["neg", "Negative"]], "all")}</div><div id="feed"></div></div>`;
+  lineChart(root.querySelector("#c-msent"), { series: [{ name: "Market sentiment", ...d.series, color: "--series-1" }], height: 220, zeroLine: true, yFormat: (v) => signed(v, 2) });
+  lineChart(root.querySelector("#c-mvol"), { series: [{ name: "Stories", ...d.volume, color: "--series-1" }], height: 220, area: true, yMin: 0, yFormat: (v) => num(v, 0) });
+  barChart(root.querySelector("#c-ssent"), d.sectors.map((x) => ({
+    label: x.sector, value: x.sent_7d, onClick: () => (location.hash = `#/screener?sector=${encodeURIComponent(x.sector)}&view=analyst`),
+    extra: `<div class="tt-row"><span>Stories</span><span>${x.news_7d}</span></div><div class="tt-row"><span>30-day tone</span><span>${signed(x.sent_30d)}</span></div>`,
+  })).sort((a, b) => b.value - a.value), { format: (v) => signed(v), valueName: "7-day sentiment", label: "Sector sentiment" });
+  const tbl = (rows) => `<table><thead><tr><th>Stock</th><th>7-day tone</th><th>30-day tone</th><th>Stories</th><th>vs normal</th></tr></thead><tbody>${rows.map((x) => `<tr class="link" data-sym="${x.symbol}"><td><span class="sym">${x.symbol}</span> <span class="nm">${esc(x.name)}</span></td><td>${sentTag(x.sent_7d)}</td><td>${signed(x.sent_30d)}</td><td>${x.news_7d}</td><td>${isNum(x.news_ratio) ? num(x.news_ratio, 1) + "×" : "–"}</td></tr>`).join("")}</tbody></table>`;
+  root.querySelector("#t-pos").innerHTML = tbl(d.most_positive);
+  root.querySelector("#t-neg").innerHTML = tbl(d.most_negative);
+  root.querySelector("#t-busy").innerHTML = tbl(d.busiest);
+  linkRows(root);
+  const drawFeed = (tone) => {
+    const items = d.latest.filter((i) => tone === "all" || (tone === "pos" ? i.sentiment > 0.1 : i.sentiment < -0.1)).slice(0, 25);
+    root.querySelector("#feed").innerHTML = items.length ? headlineList(items, true) : `<div class="empty">No stories.</div>`;
+  };
+  drawFeed("all");
+  onSeg(root, "tone", drawFeed);
 }
 
 function renderForecast(root, fc) {
@@ -380,7 +561,8 @@ function renderForecast(root, fc) {
     <p class="note">Persistence ${num(v.persistence, 3)} — ${v.persistence > 0.97 ? "volatility shocks fade slowly" : "volatility shocks fade within weeks"}.</p>`;
   lineChart(root.querySelector("#c-vol"), {
     series: [{ name: "Expected volatility", dates: fc.paths.map((r) => r.date), values: v.term_structure, color: "--series-1" }],
-    height: 160, yFormat: (x) => pctPlain(x, 1),
+    // The term structure often spans well under a percentage point, so ticks need two decimals.
+    height: 160, yFormat: (x) => pctPlain(x, 2),
   });
 
   const d = fc.direction;
@@ -391,12 +573,13 @@ function renderForecast(root, fc) {
       <dt>Majority-class baseline</dt><dd>${pctPlain(d.baseline_accuracy, 1)}</dd>
       <dt>Edge over baseline</dt><dd class="${cls(d.edge)}">${pct(d.edge, 1)}</dd>
     </dl>
+    ${d.alt_data_features?.length ? `<p class="note" style="margin:0 0 10px">Includes alternative data: ${d.alt_data_features.map((f) => ({ sent_7d: "news sentiment", news_ratio: "news volume", eps_rev_30d: "estimate revisions" }[f] || f)).join(", ")}.</p>` : ""}
     <h3 style="margin-bottom:6px">What the model leans on</h3>
     <div class="chart" id="c-imp"></div>
     <p class="note">${d.edge > 0.02 ? "The classifier has shown a modest out-of-sample edge." : "No reliable out-of-sample edge — the probability above should not drive decisions on its own."} ${d.folds} time-ordered folds with a ${d.horizon_days}-day gap to prevent look-ahead.</p>`
     : `<div class="empty">${esc(d.reason)}</div>`;
   if (d.available) {
-    const names = { ret_1: "1-day return", ret_5: "5-day return", ret_21: "1-month return", ret_63: "3-month return", vol_21: "1-month volatility", vol_ratio: "Vol regime", rsi_14: "RSI (14)", dist_50dma: "vs 50-day avg", mkt_ret_5: "Market 5-day", mkt_ret_21: "Market 1-month" };
+    const names = { sent_7d: "News sentiment", news_ratio: "News volume", eps_rev_30d: "EPS revisions", ret_1: "1-day return", ret_5: "5-day return", ret_21: "1-month return", ret_63: "3-month return", vol_21: "1-month volatility", vol_ratio: "Vol regime", rsi_14: "RSI (14)", dist_50dma: "vs 50-day avg", mkt_ret_5: "Market 5-day", mkt_ret_21: "Market 1-month" };
     rankBars(root.querySelector("#c-imp"), d.feature_importance.slice(0, 6).map((f) => ({ label: names[f.feature] || f.feature, value: f.importance })), { format: (x) => pctPlain(x, 0) });
   }
 }
@@ -524,7 +707,7 @@ async function viewQuality(root) {
 
 // ---------------------------------------------------------------- shell
 
-const ROUTES = { overview: viewOverview, screener: viewScreener, stock: viewStock, sectors: viewSectors, risk: viewRisk, macro: viewMacro, quality: viewQuality };
+const ROUTES = { overview: viewOverview, news: viewNews, screener: viewScreener, stock: viewStock, sectors: viewSectors, risk: viewRisk, macro: viewMacro, quality: viewQuality };
 
 async function route() {
   const [path, qs] = (location.hash.slice(2) || "overview").split("?");

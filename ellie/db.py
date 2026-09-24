@@ -67,6 +67,68 @@ CREATE TABLE IF NOT EXISTS fundamentals (
     PRIMARY KEY (symbol, metric, period_end)
 );
 
+-- News items, de-duplicated across sources. ``sources`` lists every feed that carried the story.
+CREATE TABLE IF NOT EXISTS news (
+    id           TEXT PRIMARY KEY,
+    symbol       TEXT NOT NULL,
+    published_at TEXT NOT NULL,
+    source       TEXT NOT NULL,
+    sources      TEXT NOT NULL,
+    headline     TEXT NOT NULL,
+    summary      TEXT,
+    url          TEXT,
+    sentiment    REAL,
+    scorer       TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_news_symbol_time ON news(symbol, published_at);
+
+-- Analyst estimate snapshots. One row per source per ingestion day, so revisions can be measured.
+CREATE TABLE IF NOT EXISTS estimates (
+    symbol     TEXT NOT NULL,
+    period     TEXT NOT NULL,   -- fiscal year, e.g. FY2027
+    metric     TEXT NOT NULL,   -- eps | revenue
+    as_of      TEXT NOT NULL,
+    mean       REAL NOT NULL,
+    high       REAL,
+    low        REAL,
+    n_analysts INTEGER,
+    source     TEXT NOT NULL,
+    PRIMARY KEY (symbol, period, metric, as_of, source)
+);
+
+CREATE TABLE IF NOT EXISTS recommendations (
+    symbol      TEXT NOT NULL,
+    period      TEXT NOT NULL,  -- month the counts refer to
+    strong_buy  INTEGER NOT NULL,
+    buy         INTEGER NOT NULL,
+    hold        INTEGER NOT NULL,
+    sell        INTEGER NOT NULL,
+    strong_sell INTEGER NOT NULL,
+    source      TEXT NOT NULL,
+    PRIMARY KEY (symbol, period, source)
+);
+
+CREATE TABLE IF NOT EXISTS price_targets (
+    symbol     TEXT NOT NULL,
+    as_of      TEXT NOT NULL,
+    mean       REAL NOT NULL,
+    median     REAL,
+    high       REAL,
+    low        REAL,
+    n_analysts INTEGER,
+    source     TEXT NOT NULL,
+    PRIMARY KEY (symbol, as_of, source)
+);
+
+CREATE TABLE IF NOT EXISTS earnings_surprises (
+    symbol   TEXT NOT NULL,
+    period   TEXT NOT NULL,     -- fiscal quarter end date
+    actual   REAL NOT NULL,
+    estimate REAL NOT NULL,
+    source   TEXT NOT NULL,
+    PRIMARY KEY (symbol, period, source)
+);
+
 CREATE TABLE IF NOT EXISTS ingestion_runs (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     started_at  TEXT NOT NULL,

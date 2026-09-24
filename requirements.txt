@@ -6,6 +6,8 @@ scipy>=1.11
 statsmodels>=0.14
 scikit-learn>=1.4
 requests>=2.31
+# optional at runtime: language-model sentiment scoring (ELLIE_SENTIMENT_SCORER=claude)
+anthropic>=1.8
 # dev / test
 pytest>=8
 httpx>=0.27
